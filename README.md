@@ -1,5 +1,7 @@
-# hamt
+# rcu\_list
 
-An efficient implementation of hash array mapped tries.
+A linked list synchronized with userspace RCU.
 
-A work in progress.
+Gives extremely high read-side throughput: reads are wait-free and require virtually no synchronization.
+
+Mainly to learn userspace RCU techniques.
