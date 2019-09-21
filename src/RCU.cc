@@ -7,12 +7,15 @@ static int membarrier(int cmd, int flags) {
 }
 
 bool RcuManager::registerCurrentProcess(void) {
+    // Query membarrier for supported operations.
     auto ret = membarrier(MEMBARRIER_CMD_QUERY, 0);
 
+    // Check whether query failed.
     if (ret < 0) {
         return false;
     }
 
+    // Check whether the commands we'll use are supported.
     if (!(ret & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED)) {
         return false;
     }
@@ -29,7 +32,8 @@ bool RcuManager::registerCurrentProcess(void) {
     }
 
     // Try it out once to test that it works: the docs specify that if it
-    // fails at all, it must fail the first time.
+    // fails at all, it must fail the first time. This call means we don't
+    // have to worry about errors on future calls.
     ret = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
 
     if (ret < 0) {
@@ -42,6 +46,7 @@ bool RcuManager::registerCurrentProcess(void) {
 
 void RcuManager::registerCurrentThread(void) {
     std::unique_lock lock(mutex);
+    // Our gracePeriodCounter starts at 0.
     threadLocalEntry.gracePeriodCounter.store(0,
             std::memory_order_relaxed);
     entries.push_back(&threadLocalEntry);
@@ -60,9 +65,6 @@ void RcuManager::synchronize(void) {
     std::unique_lock lock(mutex);
     membarrierAllThreads();
     toggleAndWaitForThreads();
-    // This doesn't seem right to me, but it's there in the paper and
-    // I'm not one to mess with barriers...
-    std::atomic_thread_fence(std::memory_order_relaxed);
     toggleAndWaitForThreads();
     membarrierAllThreads();
 }
@@ -87,9 +89,10 @@ void RcuManager::toggleAndWaitForThreads(void) {
         while (true) {
             auto entryGP = entry->gracePeriodCounter.load(
                     std::memory_order_relaxed);
-            bool ongoing = (entryGP & NESTING_MASK)
-                        && ((entryGP ^ newGracePeriod) & GP_COUNTER_MASK);
-            if (!ongoing) break;
+            if (!(entryGP & NESTING_MASK))
+                break;
+            if ((entryGP & GP_COUNTER_MASK) == (newGracePeriod & GP_COUNTER_MASK))
+                break;
             std::this_thread::sleep_for(1ms);
         }
     }

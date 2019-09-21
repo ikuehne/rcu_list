@@ -12,62 +12,44 @@ class RcuList {
 public:
     RcuList() : head(nullptr) {}
 
-    bool remove(RcuManager &manager, std::uint64_t data) {
-        while (true) {
+    uint64_t pop(RcuManager &manager) {
+        RcuListNode *oldHead;
+        bool success;
+
+        do {
             manager.readLock();
+            oldHead = head.load(std::memory_order_relaxed);
+            if (oldHead == nullptr) break;
+            RcuListNode *newHead = oldHead->next.load(
+                std::memory_order_relaxed);
+            success = head.compare_exchange_weak(oldHead, newHead, 
+                std::memory_order_acq_rel);
+            manager.readUnlock();
+        } while (!success);
 
-            std::atomic<RcuListNode *> *prev = &head;
-            RcuListNode *cur = head.load(std::memory_order_relaxed);
-
-            // Invariant: prev->load() == cur (modulo changes by other threads,
-            // which we will detect with CAS).
-            for (; cur != nullptr;
-                 cur = cur->next.load(std::memory_order_relaxed)) {
-                if (cur->data == data) {
-                    break;
-                }
-                prev = &cur->next;
-            }
-
-            if (cur == nullptr) {
-                manager.readUnlock();
-                return false;
-            }
-
-            assert(cur->data == data);
-
-            if (cur->data == data) {
-                RcuListNode *next = cur->next.load(
-                        std::memory_order_relaxed);
-                bool success =
-                    prev->compare_exchange_weak(cur, next,
-                        std::memory_order_release);
-                if (success) {
-                    manager.readUnlock();
-                    manager.synchronize();
-                    delete cur;
-                    return true;
-                } else {
-                    manager.readUnlock();
-                }
-            }
+        if (oldHead == nullptr) {
+            return 0xDEAD;
         }
+
+        uint64_t result = oldHead->data;
+        manager.synchronize();
+        delete oldHead;
+        return result;
     }
 
-    void insert(RcuManager &manager, std::uint64_t data) {
+    void pop(RcuManager &manager, std::uint64_t data) {
         auto newNode = new RcuListNode {
             nullptr,
             data
         };
 
-        RcuListNode *old;
         bool success;
         do {
             manager.readLock();
-            old = head.load(std::memory_order_relaxed);
+            RcuListNode *old = head.load(std::memory_order_relaxed);
             newNode->next = old;
             success = head.compare_exchange_weak(old, newNode,
-                std::memory_order_release);
+                std::memory_order_acq_rel);
             manager.readUnlock();
         } while (!success);
     }

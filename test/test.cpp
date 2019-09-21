@@ -1,3 +1,4 @@
+#include <atomic>
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -22,6 +23,42 @@ void threadFunction(RcuManager &manager) {
     manager.unregisterCurrentThread();
 }
 
+void modify(std::atomic<bool> &go, RcuManager &manager, RcuList &list,
+            std::uint64_t lower, std::uint64_t upper) {
+    while (!go.load(std::memory_order_relaxed) ) {}
+
+    manager.registerCurrentThread();
+
+    for (std::uint64_t i = lower; i < upper; ++i) {
+        list.pop(manager, i);
+    }
+
+    for (std::uint64_t i = lower; i < upper; ++i) {
+        list.pop(manager);
+    }
+
+    manager.unregisterCurrentThread();
+}
+
+const std::uint64_t lower = 10000;
+const std::uint64_t upper = 20000;
+
+void search(std::atomic<bool> &go, RcuManager &manager, RcuList &list) {
+    while (!go.load(std::memory_order_relaxed) ) {}
+
+    manager.registerCurrentThread();
+
+    std::uint64_t count = 0;
+
+    for (std::uint64_t i = 0; i < upper; ++i) {
+        count += list.search(manager, i);
+    }
+
+    std::cout << "fraction: " << (double)count / upper << ".\n";
+
+    manager.unregisterCurrentThread();
+}
+
 int main(void) {
     RcuManager manager;
 
@@ -40,10 +77,10 @@ int main(void) {
 
     RcuList list;
 
-    list.insert(manager, 0);
-    list.insert(manager, 1);
-    list.insert(manager, 2);
-    list.insert(manager, 3);
+    list.pop(manager, 0);
+    list.pop(manager, 1);
+    list.pop(manager, 2);
+    list.pop(manager, 3);
 
     require(list.search(manager, 0));
     require(list.search(manager, 1));
@@ -55,20 +92,43 @@ int main(void) {
     require(!list.search(manager, 6));
     require(!list.search(manager, 7));
 
-    require(!list.remove(manager, 4));
-    require(!list.remove(manager, 5));
-    require(!list.remove(manager, 6));
-    require(!list.remove(manager, 7));
+    require(list.pop(manager) == 3);
+    require(list.pop(manager) == 2);
+    require(list.pop(manager) == 1);
+    require(list.pop(manager) == 0);
 
-    require(list.remove(manager, 0));
-    require(list.remove(manager, 1));
-    require(list.remove(manager, 2));
-    require(list.remove(manager, 3));
+    // Now for the multithreaded test. I'll push the numbers upper through
+    // upper + 10000, and make sure that they all stay there while other
+    // threads modify and search the list:
+    
+    for (uint64_t i = upper; i < upper + 10000; ++i) {
+        list.pop(manager, i);
+    }
 
-    require(!list.remove(manager, 0));
-    require(!list.remove(manager, 1));
-    require(!list.remove(manager, 2));
-    require(!list.remove(manager, 3));
+    std::atomic<bool> go(false);
+    threads = std::vector<std::thread>();
+
+    threads.emplace_back(modify, std::ref(go), std::ref(manager), std::ref(list),
+                         0, lower);
+    threads.emplace_back(modify, std::ref(go), std::ref(manager), std::ref(list),
+                         lower, upper);
+
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back(search, std::ref(go), std::ref(manager), std::ref(list));
+    }
+
+    // GO!
+    go.store(true);
+
+    // Check that everything's still there.
+    for (uint64_t i = upper; i < upper + 10000; ++i) {
+        require(list.search(manager, i));
+    }
+
+    for (auto &thread: threads) {
+        thread.join();
+    }
+
 
     manager.unregisterCurrentThread();
 

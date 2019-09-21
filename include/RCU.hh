@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <iostream>
 #include <mutex>
@@ -27,7 +28,7 @@ static thread_local PerThreadEntry threadLocalEntry;
 // Manages userspace RCU synchronization.
 class RcuManager {
 public:
-    RcuManager() : globalGracePeriod(1), entries(), mutex() {}
+    RcuManager() : mutex(), globalGracePeriod(1), entries() {}
 
     // Register that the current process wants to use RCU.
     //
@@ -40,7 +41,7 @@ public:
     // `membarrier`. If this method fails RCU will not work.
     bool registerCurrentProcess(void);
 
-    // Add the curren thread to the RCU registry.
+    // Add the current thread to the RCU registry.
     //
     // Must be called before this thread calls unregisterCurrentThread,
     // readLock, readUnlock, or synchronize.
@@ -59,19 +60,45 @@ public:
     // operation on shared data, and readUnlock once the operation is
     // finished.  Each readLock must be paired with a corresponding readUnlock.
     // The period between the readLock and the corresponding readUnlock is a
-    // "read-side critical section". See synchronize for the semantics of a
-    // read-side critical section.
+    // "read-side critical section". Read-side critical sections can be
+    // arbitrarily nested on a single thread; nested critical sections are
+    // functionally equivalent to a single critical section of the same
+    // duration as the widest nesting. That is, the following series of
+    // operations:
+    //
+    //     readLock();
+    //     A();
+    //     readLock();
+    //     B();
+    //     readUnlock();
+    //     C();
+    //     readUnlock();
+    //
+    // Is functionally equivalent to:
+    //
+    //     readLock();
+    //     A();
+    //     B();
+    //     C();
+    //     readUnlock();
     //
     // Whenever a reader thread is not in a read-side critical section, it is
     // in a "quiescent state".
+    //
+    // See synchronize for the semantics of read-side critical sections and
+    // quiescent states.
     inline void readLock(void) const {
         auto tmp = threadLocalEntry.gracePeriodCounter.load(
                 std::memory_order_relaxed);
+        // If our nesting is currently 0,
         if (!(tmp & NESTING_MASK)) {
+            // Simultaneously set nesting to 1 and read the current grace
+            // period.
             auto global = globalGracePeriod.load(std::memory_order_relaxed);
             threadLocalEntry.gracePeriodCounter.store(global,
                     std::memory_order_relaxed);
         } else {
+            // Increment our nesting.
             threadLocalEntry.gracePeriodCounter.store(tmp + 1,
                     std::memory_order_relaxed);
         }
@@ -79,6 +106,7 @@ public:
 
     // Mark the end of a read-side critical section.
     inline void readUnlock(void) const {
+        // Subtract one from our nesting.
         auto tmp = threadLocalEntry.gracePeriodCounter.load(
                 std::memory_order_relaxed);
         threadLocalEntry.gracePeriodCounter.store(tmp - 1,
@@ -124,9 +152,22 @@ private:
     // Use the membarrier syscall to wait until all threads run a full fence.
 	inline void membarrierAllThreads(void);
 
+    // Toggle the globalGracePeriod
     inline void toggleAndWaitForThreads(void);
 
-    std::atomic<std::uint64_t> globalGracePeriod;
-    std::list<PerThreadEntry *> entries;
+    // The registry mutex.
     std::mutex mutex;
+
+    // Contains the grace period in a single bit. Also contains a 1 in the low
+    // bit, so that reader threads can simultaneously read the grace period
+    // and set their nesting to 1.
+    //
+    // CAN ONLY BE MODIFIED WHILE HOLDING mutex. Reader threads atomically
+    // read this without holding mutex.
+    std::atomic<std::uint64_t> globalGracePeriod;
+
+    // The thread registry.
+    //
+    // CAN ONLY BE READ OR MODIFIED WHILE HOLDING mutex.
+    std::list<PerThreadEntry *> entries;
 };
