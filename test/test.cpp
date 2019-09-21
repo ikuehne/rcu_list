@@ -16,105 +16,103 @@ void require(bool b) {
     if (!b) die();
 }
 
-void threadFunction(RcuManager &manager) {
+void threadFunction() {
     using namespace std::literals;
-    manager.registerCurrentThread();
+    rcu::registerCurrentThread();
     std::this_thread::sleep_for(1ms);
-    manager.unregisterCurrentThread();
+    rcu::unregisterCurrentThread();
 }
 
-void modify(std::atomic<bool> &go, RcuManager &manager, RcuList &list,
+void modify(std::atomic<bool> &go, RcuList &list,
             std::uint64_t lower, std::uint64_t upper) {
     while (!go.load(std::memory_order_relaxed) ) {}
 
-    manager.registerCurrentThread();
+    rcu::registerCurrentThread();
 
     for (std::uint64_t i = lower; i < upper; ++i) {
-        list.push(manager, i);
+        list.push(i);
     }
 
     for (std::uint64_t i = lower; i < upper; ++i) {
-        list.pop(manager);
+        list.pop();
     }
 
-    manager.unregisterCurrentThread();
+    rcu::unregisterCurrentThread();
 }
 
 const std::uint64_t lower = 10000;
 const std::uint64_t upper = 20000;
 
-void search(std::atomic<bool> &go, RcuManager &manager, RcuList &list) {
+void search(std::atomic<bool> &go, RcuList &list) {
     while (!go.load(std::memory_order_relaxed) ) {}
 
-    manager.registerCurrentThread();
+    rcu::registerCurrentThread();
 
     std::uint64_t count = 0;
 
     for (std::uint64_t i = 0; i < upper; ++i) {
-        count += list.search(manager, i);
+        count += list.search(i);
     }
 
     std::cout << "fraction: " << (double)count / upper << ".\n";
 
-    manager.unregisterCurrentThread();
+    rcu::unregisterCurrentThread();
 }
 
 int main(void) {
-    RcuManager manager;
-
-    require(manager.registerCurrentProcess());
-    manager.registerCurrentThread();
+    require(rcu::registerCurrentProcess());
+    rcu::registerCurrentThread();
 
     std::vector<std::thread> threads;
 
     for (int i = 0; i < 8; ++i) {
-        threads.emplace_back(threadFunction, std::ref(manager));
+        threads.emplace_back(threadFunction);
     }
 
     for (auto &thread: threads) {
         thread.join();
     }
 
-    RcuList list(manager);
+    RcuList list;
 
-    list.push(manager, 0);
-    list.push(manager, 1);
-    list.push(manager, 2);
-    list.push(manager, 3);
+    list.push(0);
+    list.push(1);
+    list.push(2);
+    list.push(3);
 
-    require(list.search(manager, 0));
-    require(list.search(manager, 1));
-    require(list.search(manager, 2));
-    require(list.search(manager, 3));
+    require(list.search(0));
+    require(list.search(1));
+    require(list.search(2));
+    require(list.search(3));
 
-    require(!list.search(manager, 4));
-    require(!list.search(manager, 5));
-    require(!list.search(manager, 6));
-    require(!list.search(manager, 7));
+    require(!list.search(4));
+    require(!list.search(5));
+    require(!list.search(6));
+    require(!list.search(7));
 
-    require(list.pop(manager) == 3);
-    require(list.pop(manager) == 2);
-    require(list.pop(manager) == 1);
-    require(list.pop(manager) == 0);
+    require(list.pop() == 3);
+    require(list.pop() == 2);
+    require(list.pop() == 1);
+    require(list.pop() == 0);
 
     // Now for the multithreaded test. I'll push the numbers upper through
     // upper + 10000, and make sure that they all stay there while other
     // threads modify and search the list:
     
     for (uint64_t i = upper; i < upper + 10000; ++i) {
-        list.push(manager, i);
+        list.push(i);
     }
 
     std::atomic<bool> go(false);
     threads = std::vector<std::thread>();
 
-    threads.emplace_back(modify, std::ref(go), std::ref(manager), std::ref(list),
+    threads.emplace_back(modify, std::ref(go), std::ref(list),
                          0, lower);
-    threads.emplace_back(modify, std::ref(go), std::ref(manager), std::ref(list),
+    threads.emplace_back(modify, std::ref(go), std::ref(list),
                          lower, upper);
 
     for (int i = 0; i < 8; ++i) {
-        threads.emplace_back(search, std::ref(go), std::ref(manager), std::ref(list));
+        threads.emplace_back(search, std::ref(go), std::ref(list));
     }
 
     // GO!
@@ -122,14 +120,14 @@ int main(void) {
 
     // Check that everything's still there.
     for (uint64_t i = upper; i < upper + 10000; ++i) {
-        require(list.search(manager, i));
+        require(list.search(i));
     }
 
     for (auto &thread: threads) {
         thread.join();
     }
 
-    manager.unregisterCurrentThread();
+    rcu::unregisterCurrentThread();
 
     list.joinGC();
 

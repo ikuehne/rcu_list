@@ -1,5 +1,7 @@
 #include "RCU.hh"
 
+namespace rcu {
+
 // Keep track of where the thread is in the registry.
 //
 // This lets us deregister threads in unregisterCurrentThreads.
@@ -24,7 +26,14 @@ static int membarrier(int cmd, int flags) {
     return syscall(__NR_membarrier, cmd, flags);
 }
 
-bool RcuManager::registerCurrentProcess(void) {
+void membarrierAllThreads(void) {
+    // According to the docs, we don't need to check for errors here: if the
+    // call in registerCurrentProcess succeeds, all subsequent calls should
+    // succeed.
+    membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
+}
+
+bool registerCurrentProcess(void) {
     // Query membarrier for supported operations.
     auto ret = membarrier(MEMBARRIER_CMD_QUERY, 0);
 
@@ -62,7 +71,7 @@ bool RcuManager::registerCurrentProcess(void) {
     return true;
 }
 
-void RcuManager::registerCurrentThread(void) {
+void registerCurrentThread(void) {
     std::unique_lock lock(mutex);
     // Our gracePeriodCounter starts at 0.
     threadLocalEntry.gracePeriodCounter.store(0,
@@ -74,12 +83,13 @@ void RcuManager::registerCurrentThread(void) {
     spotInList--;
 }
 
-void RcuManager::unregisterCurrentThread(void) {
+void unregisterCurrentThread(void) {
     std::unique_lock lock(mutex);
     entries.erase(spotInList);
 }
 
-void RcuManager::synchronize(void) {
+static inline void toggleAndWaitForThreads(void);
+void synchronize(void) {
     std::unique_lock lock(mutex);
     // Wait until all reader threads have run a full memory barrier. In effect
     // this synchronizes-with the notional "memory barriers" in readLock and
@@ -104,18 +114,11 @@ void RcuManager::synchronize(void) {
     membarrierAllThreads();
 }
 
-void RcuManager::membarrierAllThreads(void) {
-    // According to the docs, we don't need to check for errors here: if the
-    // call in registerCurrentProcess succeeds, all subsequent calls should
-    // succeed.
-    membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
-}
-
 // Toggle the GP bit and wait until we observe one of two things for every
 // thread:
 //  - They are in a quiescent state.
 //  - Their thread-local GP bit matcches the global one.
-void RcuManager::toggleAndWaitForThreads(void) {
+void toggleAndWaitForThreads(void) {
     using namespace std::literals;
 
     auto oldGracePeriod = globalGracePeriod.load(
@@ -135,4 +138,6 @@ void RcuManager::toggleAndWaitForThreads(void) {
             std::this_thread::sleep_for(1ms);
         }
     }
+}
+
 }

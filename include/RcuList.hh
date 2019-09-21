@@ -14,19 +14,19 @@ struct RcuListNode {
 
 class RcuList {
 public:
-    RcuList(RcuManager &manager) : head(nullptr), gc(manager) {}
+    RcuList() : head(nullptr), gc() {}
 
     void joinGC(void) {
         gc.join();
     }
 
-    uint64_t pop(RcuManager &manager) {
+    uint64_t pop() {
         RcuListNode *oldHead;
         bool success;
 
         do {
             // Use RCU for ABA protection.
-            manager.readLock();
+            rcu::readLock();
             // This load synchronizes-with committing CAS-es, so that we
             // always read the updated next pointer.
             oldHead = head.load(std::memory_order_acquire);
@@ -48,21 +48,21 @@ public:
             // violates our RCU guarantees, so case (2) is impossible.
             success = head.compare_exchange_weak(oldHead, newHead, 
                 std::memory_order_release);
-            manager.readUnlock();
+            rcu::readUnlock();
         } while (!success);
 
         if (oldHead == nullptr) {
             return 0xDEAD;
         }
 
-        assert(!search(manager, oldHead->data));
+        assert(!search(oldHead->data));
 
         uint64_t result = oldHead->data;
-        gc.discard(manager, oldHead);
+        gc.discard(oldHead);
         return result;
     }
 
-    void push(RcuManager &manager, std::uint64_t data) {
+    void push(std::uint64_t data) {
         auto newNode = new RcuListNode {
             nullptr,
             data
@@ -72,34 +72,34 @@ public:
         do {
             // See the comments in pop for an explanation of how
             // this is synchronized.
-            manager.readLock();
+            rcu::readLock();
             RcuListNode *old = head.load(std::memory_order_acquire);
             newNode->next.store(old, std::memory_order_relaxed);
             success = head.compare_exchange_weak(old, newNode,
                 std::memory_order_release);
-            manager.readUnlock();
+            rcu::readUnlock();
         } while (!success);
     }
 
-    bool search(RcuManager &manager, std::uint64_t data) {
-        manager.readLock();
+    bool search(std::uint64_t data) {
+        rcu::readLock();
 
         for (RcuListNode *cur = head.load(std::memory_order_acquire);
              cur != nullptr;
              cur = cur->next.load(std::memory_order_acquire)) {
             if (cur->data == data) {
-                manager.readUnlock();
+                rcu::readUnlock();
                 return true;
             }
         }
 
-        manager.readUnlock();
+        rcu::readUnlock();
 
         return false;
     }
 
 private:
     std::atomic<RcuListNode *> head;
-    char padding[CACHE_LINE_BYTES];
-    GarbageCollector<RcuListNode> gc;
+    char padding[rcu::CACHE_LINE_BYTES];
+    rcu::GarbageCollector<RcuListNode> gc;
 };
