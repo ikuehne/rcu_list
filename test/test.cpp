@@ -30,7 +30,7 @@ void modify(std::atomic<bool> &go, RcuManager &manager, RcuList &list,
     manager.registerCurrentThread();
 
     for (std::uint64_t i = lower; i < upper; ++i) {
-        list.pop(manager, i);
+        list.push(manager, i);
     }
 
     for (std::uint64_t i = lower; i < upper; ++i) {
@@ -75,12 +75,12 @@ int main(void) {
         thread.join();
     }
 
-    RcuList list;
+    RcuList list(manager);
 
-    list.pop(manager, 0);
-    list.pop(manager, 1);
-    list.pop(manager, 2);
-    list.pop(manager, 3);
+    list.push(manager, 0);
+    list.push(manager, 1);
+    list.push(manager, 2);
+    list.push(manager, 3);
 
     require(list.search(manager, 0));
     require(list.search(manager, 1));
@@ -102,7 +102,7 @@ int main(void) {
     // threads modify and search the list:
     
     for (uint64_t i = upper; i < upper + 10000; ++i) {
-        list.pop(manager, i);
+        list.push(manager, i);
     }
 
     std::atomic<bool> go(false);
@@ -129,8 +129,9 @@ int main(void) {
         thread.join();
     }
 
-
     manager.unregisterCurrentThread();
+
+    list.joinGC();
 
     return 0;
 }

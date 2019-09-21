@@ -1,7 +1,25 @@
 #include "RCU.hh"
 
+// Keep track of where the thread is in the registry.
+//
+// This lets us deregister threads in unregisterCurrentThreads.
 static thread_local std::list<PerThreadEntry *>::iterator spotInList;
 
+// Wrap the membarrier syscall.
+//
+// We use three membarrier commands:
+//
+//  - MEMBARRIER_CMD_QUERY: returns <0 for an error, or a bitmask of
+//    supported commands otherwise.
+//
+//  - MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: register the process's intent
+//    to recieve expedited membarriers. Once this is called, future calls to
+//    MEMBARRIER_CMD_PRIVATE_EXPEDITED will force all threads in this process
+//    to execute a full memory barrier.
+//
+//  - MEMBARRIER_CMD_PRIVATE_EXPEDITED: force all threads in this process to
+//    execute a full memory barrier.
+//
 static int membarrier(int cmd, int flags) {
     return syscall(__NR_membarrier, cmd, flags);
 }
@@ -63,9 +81,26 @@ void RcuManager::unregisterCurrentThread(void) {
 
 void RcuManager::synchronize(void) {
     std::unique_lock lock(mutex);
+    // Wait until all reader threads have run a full memory barrier. In effect
+    // this synchronizes-with the notional "memory barriers" in readLock and
+    // readUnlock.
     membarrierAllThreads();
+    // Toggle the GP bit and wait until every thread has either entered a
+    // quiescent state, or matches the new GP bit. If a thread has entered a
+    // quiescent state, then we're good as far as that thread is concerned.
+    // However, if a thread only has a matching GP bit, then one of two things
+    // may have happened:
+    //
+    //  - They may have read the new GP bit. In that case, we're fine.
+    //  - They may have read an old GP bit during the last call to
+    //    synchronize.
+    //
+    // To rule out the latter case...
     toggleAndWaitForThreads();
+    // We toggle the bit again and perform the same check.
     toggleAndWaitForThreads();
+    // Similar to the membarrierAllThreads above. This one ensures that reader
+    // threads' reads of shared data happen-before we return.
     membarrierAllThreads();
 }
 
@@ -76,6 +111,10 @@ void RcuManager::membarrierAllThreads(void) {
     membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
 }
 
+// Toggle the GP bit and wait until we observe one of two things for every
+// thread:
+//  - They are in a quiescent state.
+//  - Their thread-local GP bit matcches the global one.
 void RcuManager::toggleAndWaitForThreads(void) {
     using namespace std::literals;
 

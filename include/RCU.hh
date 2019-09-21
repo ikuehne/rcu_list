@@ -1,3 +1,18 @@
+// An implementation of userspace RCU (Read-Copy-Update).
+//
+// This algorithm is based on [1].
+//
+// Allows deferring reclamation of memory until after readers leave their
+// critical sections, while imposing minimal overhead on readers. Also
+// provides a garbage-collection facility for doing the reclamation
+// asynchronously.
+//
+// [1] M. Desnoyers et al., "User-Level Implementations of Read-Copy Update,"
+//     IEEE Transactions on Parallel and Distributed Systems, 2011.
+//     [Online serial] Available:
+//     https://www.efficios.com/pub/rcu/urcu-main.pdf. [Accessed Sept, 2019].
+//
+
 #pragma once
 
 #include <atomic>
@@ -97,6 +112,13 @@ public:
             auto global = globalGracePeriod.load(std::memory_order_relaxed);
             threadLocalEntry.gracePeriodCounter.store(global,
                     std::memory_order_relaxed);
+            // This "memory barrier" should compile to nothing.
+            //
+            // It's here because the first membarrierAllThreads call in
+            // synchronize effectively synchronizes-with this "memory barrier"
+            // to ensure that the start of our read-side critical section
+            // happens-before any reads of shared data.
+            std::atomic_thread_fence(std::memory_order_relaxed);
         } else {
             // Increment our nesting.
             threadLocalEntry.gracePeriodCounter.store(tmp + 1,
@@ -106,6 +128,14 @@ public:
 
     // Mark the end of a read-side critical section.
     inline void readUnlock(void) const {
+        // Like the barrier in read-lock, this is essentially here for
+        // documentation.
+        //
+        // This barrier synchronizes-with the barrier at the start of
+        // `synchronize` to ensure that all of our reads happen-before we
+        // enter a quiescent state.
+        std::atomic_thread_fence(std::memory_order_relaxed);
+
         // Subtract one from our nesting.
         auto tmp = threadLocalEntry.gracePeriodCounter.load(
                 std::memory_order_relaxed);
@@ -170,4 +200,114 @@ private:
     //
     // CAN ONLY BE READ OR MODIFIED WHILE HOLDING mutex.
     std::list<PerThreadEntry *> entries;
+};
+
+// Asynchronously deletes RCU-protected objects of type T.
+template<typename T>
+class GarbageCollector {
+public:
+    GarbageCollector(RcuManager &manager)
+        : gcThread(gcLoop, this, std::ref(manager)), head(nullptr), done(false) {}
+
+    // Wait until the GC thread is done, and then join it.
+    void join(void) {
+        done.store(true, std::memory_order_relaxed);
+        gcThread.join();
+    }
+
+    // Asynchronously delete the given object.
+    //
+    // A call to manager.synchronize() is guaranteed before the memory is
+    // deleted.
+    //
+    // Non-blocking. Places the given pointer in a shared collection, which is
+    // periodically cleared by the GC thread.
+    void discard(RcuManager &manager, T *t) {
+        bool success;
+
+        do {
+            // We use RCU protection to prevent the ABA problem.
+            manager.readLock();
+            // Synchronizes-with committing CAS-es, to make sure that we read
+            // the updated next pointer.
+            T *oldHead = head.load(std::memory_order_acquire);
+            t->getGcNext().store(oldHead, std::memory_order_relaxed);
+            // Synchronizes-with reading next pointers, so that they always
+            // get the new value.
+            //
+            // This CAS is not subject to the ABA problem due to RCU
+            // protection. If the head at this CAS is equal to oldHead, either:
+            //
+            //   1. It has not been modified since we read it. This is fine.
+            //   2. Someone popped it off the stack, and then it eventually
+            //      got pushed back on.
+            //
+            // We always delete nodes after popping them, so in case (2) we
+            // must at some point have deleted oldHead. But this explicitly
+            // violates our RCU guarantees, so case (2) is impossible.
+            success = head.compare_exchange_weak(oldHead, t,
+                    std::memory_order_release);
+            manager.readUnlock();
+        } while (!success);
+    }
+
+private:
+    static void gcLoop(GarbageCollector *gc, RcuManager &manager) {
+        using namespace std::literals;
+
+        manager.registerCurrentThread();
+
+        // Loop until someone tells us to stop.
+        //
+        // We don't need any particular memory ordering guarantees on
+        // gc->done; we just need to eventually read any updates to it.
+        while (!gc->done.load(std::memory_order_relaxed)) {
+            T *oldHead;
+            bool success;
+
+            {
+                do {
+                    // See the comments in discard for an explanation of how
+                    // this is synchronized.
+                    manager.readLock();
+                    oldHead = gc->head.load(std::memory_order_acquire);
+
+                    if (oldHead == nullptr) break;
+
+                    success = gc->head.compare_exchange_weak(oldHead, nullptr,
+                            std::memory_order_release);
+                    manager.readUnlock();
+                } while(!success);
+            }
+
+            // If the stack was empty, sleep for a while and then poll it
+            // again.
+            if (oldHead == nullptr) {
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+
+            // We've acquired the entire list! Now we need to synchronize,
+            // then free it.
+
+            manager.synchronize();
+
+            T *cur = oldHead;
+            while (cur != nullptr) {
+                T *next = cur->getGcNext().load(std::memory_order_relaxed);
+                cur->getGcNext().store(nullptr, std::memory_order_relaxed);
+                delete cur;
+                cur = next;
+            }
+        }
+
+        manager.unregisterCurrentThread();
+    }
+
+    std::thread gcThread;
+    // Put padding around head to prevent false sharing.
+    std::byte padding1[CACHE_LINE_BYTES];
+    std::atomic<T *> head;
+    std::byte padding2[CACHE_LINE_BYTES];
+    std::atomic<bool> done;
 };

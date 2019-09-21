@@ -6,11 +6,19 @@
 struct RcuListNode {
     std::atomic<RcuListNode *> next;
     std::uint64_t data;
+
+    std::atomic<RcuListNode *> &getGcNext(void) {
+        return next;
+    }
 };
 
 class RcuList {
 public:
-    RcuList() : head(nullptr) {}
+    RcuList(RcuManager &manager) : head(nullptr), gc(manager) {}
+
+    void joinGC(void) {
+        gc.join();
+    }
 
     uint64_t pop(RcuManager &manager) {
         RcuListNode *oldHead;
@@ -18,10 +26,10 @@ public:
 
         do {
             manager.readLock();
-            oldHead = head.load(std::memory_order_relaxed);
+            oldHead = head.load(std::memory_order_acquire);
             if (oldHead == nullptr) break;
             RcuListNode *newHead = oldHead->next.load(
-                std::memory_order_relaxed);
+                std::memory_order_acquire);
             success = head.compare_exchange_weak(oldHead, newHead, 
                 std::memory_order_acq_rel);
             manager.readUnlock();
@@ -31,13 +39,14 @@ public:
             return 0xDEAD;
         }
 
+        assert(!search(manager, oldHead->data));
+
         uint64_t result = oldHead->data;
-        manager.synchronize();
-        delete oldHead;
+        gc.discard(manager, oldHead);
         return result;
     }
 
-    void pop(RcuManager &manager, std::uint64_t data) {
+    void push(RcuManager &manager, std::uint64_t data) {
         auto newNode = new RcuListNode {
             nullptr,
             data
@@ -46,7 +55,7 @@ public:
         bool success;
         do {
             manager.readLock();
-            RcuListNode *old = head.load(std::memory_order_relaxed);
+            RcuListNode *old = head.load(std::memory_order_acquire);
             newNode->next = old;
             success = head.compare_exchange_weak(old, newNode,
                 std::memory_order_acq_rel);
@@ -73,4 +82,6 @@ public:
 
 private:
     std::atomic<RcuListNode *> head;
+    char padding[CACHE_LINE_BYTES];
+    GarbageCollector<RcuListNode> gc;
 };
