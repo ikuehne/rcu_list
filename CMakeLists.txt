@@ -10,4 +10,7 @@ endif()
 
 include_directories(include)
 
+add_library(rcu STATIC ${CMAKE_SOURCE_DIR}/src/RCU.cc)
+
 add_executable(test test/test.cpp)
+target_link_libraries(test rcu)
