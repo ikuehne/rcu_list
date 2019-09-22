@@ -64,7 +64,6 @@ bool registerCurrentProcess(void) {
     ret = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
 
     if (ret < 0) {
-        perror("membarrier");
         return false;
     }
 
