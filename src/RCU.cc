@@ -106,7 +106,7 @@ void synchronize(void) {
     //
     // To rule out the latter case...
     toggleAndWaitForThreads();
-    // We toggle the bit again and perform the same check.
+    // we toggle the bit again and perform the same check.
     toggleAndWaitForThreads();
     // Similar to the membarrierAllThreads above. This one ensures that reader
     // threads' reads of shared data happen-before we return.
